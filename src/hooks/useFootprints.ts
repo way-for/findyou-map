@@ -8,13 +8,29 @@ export function useFootprints() {
 
   const fetchFootprints = useCallback(async () => {
     setLoading(true)
+
+    // ① 先确认当前用户已就绪（生产环境中 Supabase session 恢复可能有延迟）
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    console.log('[useFootprints] auth user:', user?.id ?? 'null', 'authError:', authError?.message ?? 'none')
+
+    if (!user) {
+      console.warn('[useFootprints] 用户未登录，跳过查询')
+      setFootprints([])
+      setLoading(false)
+      return
+    }
+
+    // ② 显式按 user_id 过滤（双重保险，即使 RLS 有误也能正确过滤）
     const { data, error } = await supabase
       .from('footprints')
       .select('*')
+      .eq('user_id', user.id)
       .order('visited_at', { ascending: false })
 
+    console.log('[useFootprints] query result — data:', data?.length ?? 0, 'error:', error?.message ?? 'none')
+
     if (error) {
-      console.error('获取足迹失败:', error.message)
+      console.error('[useFootprints] 查询失败:', error)
       setFootprints([])
     } else {
       setFootprints(data ?? [])
@@ -22,8 +38,18 @@ export function useFootprints() {
     setLoading(false)
   }, [])
 
+  // 首次加载 + 监听 auth 状态变化（登录后自动重新加载）
   useEffect(() => {
     fetchFootprints()
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      console.log('[useFootprints] auth event:', event)
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        fetchFootprints()
+      }
+    })
+
+    return () => subscription.unsubscribe()
   }, [fetchFootprints])
 
   const addFootprint = useCallback(
@@ -60,10 +86,11 @@ export function useFootprints() {
         return { error: error.message }
       }
 
-      setFootprints((prev) => [data, ...prev])
+      // 添加成功后重新拉取完整列表（确保与服务端一致）
+      fetchFootprints()
       return { data }
     },
-    [],
+    [fetchFootprints],
   )
 
   const deleteFootprint = useCallback(async (id: string) => {
